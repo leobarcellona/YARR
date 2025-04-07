@@ -113,7 +113,7 @@ class NeRFTaskRecorder(object):
     for nerf data generation
     """
 
-    def __init__(self, env: Environment, cam_motion: list, fps=30, num_views=50, masks_cameras=[]):
+    def __init__(self, env: Environment, cam_motion: list, fps=30, num_views=50, masks_cameras=[], static_cameras=[]):
 
         self._env = env
         assert len(cam_motion) > 0, 'Plese, add at least one camera motion'
@@ -137,6 +137,13 @@ class NeRFTaskRecorder(object):
         self._intrinsics_episode_nerf = []
         self._near_far_episode_nerf = []
 
+        # Added to store static cameras
+        self._snaps_episode_static = []
+        self._depths_episode_static = []
+        self._poses_episode_static = []
+        self._intrinsics_episode_static = []
+        self._near_far_episode_static = []
+
         self.t = 0
         self._mask_cameras = masks_cameras
 
@@ -144,6 +151,9 @@ class NeRFTaskRecorder(object):
         self._snaps_episode_last_step = []
         self._poses_episode_last_step = []
         self._intrinsics_episode_last_step = []
+
+        # Added to store static cameras
+        self._static_cameras = static_cameras
 
         from termcolor import colored
         print(colored('[NeRFTaskRecorder] num_views: {}'.format(num_views), 'red'))
@@ -172,6 +182,13 @@ class NeRFTaskRecorder(object):
         self._poses_episode_nerf = []
         self._intrinsics_episode_nerf = []
         self._near_far_episode_nerf = []
+
+        self._snaps_episode_static = {}
+        self._depths_episode_static = {}
+        self._poses_episode_static = {}
+        self._intrinsics_episode_static = {}
+        self._near_far_episode_static = {}
+        self._masks_episode_static = {}
 
         self.t = 0
 
@@ -205,12 +222,24 @@ class NeRFTaskRecorder(object):
         all_clouds = []
         all_masks = []
 
-        #all_views_nerf = []
-        #all_depths_nerf = []
-        #all_poses_nerf = []
-        #all_intrinsics_nerf = []
-        #all_near_far_nerf = []
-        # t=0, which we don't need
+        if self.t == 1:
+            # add static cameras in dictionary
+            for name, _, _ in self._static_cameras:
+                self._snaps_episode_static[name] = []
+                self._depths_episode_static[name] = []
+                self._poses_episode_static[name] = []
+                self._intrinsics_episode_static[name] = []
+                self._near_far_episode_static[name] = []
+                self._masks_episode_static[name] = []
+
+        for name, rgb_camera, mask_camera in self._static_cameras:
+            self._snaps_episode_static[name].append((rgb_camera.capture_rgb() * 255.).astype(np.uint8))
+            self._poses_episode_static[name].append(rgb_camera.get_matrix())
+            self._intrinsics_episode_static[name].append(rgb_camera.get_intrinsic_matrix())
+            self._depths_episode_static[name].append(rgb_camera.capture_depth(in_meters=False))
+            self._near_far_episode_static[name].append((rgb_camera.get_near_clipping_plane(), rgb_camera.get_far_clipping_plane()))
+            self._masks_episode_static[name].append((mask_camera.capture_rgb() * 255.).astype(np.uint8))
+
 
         for i in range(self._num_views):
             self._cam_motion[0].step()
@@ -245,13 +274,6 @@ class NeRFTaskRecorder(object):
         self._masks_episode.append(all_masks)
         self._poses_masks_episode.append(all_poses_masks)
 
-        # save the views for nerf
-        #self._snaps_episode_nerf.append(all_views_nerf)
-        #self._depths_episode_nerf.append(all_depths_nerf)
-        #self._poses_episode_nerf.append(all_poses_nerf)
-        #self._intrinsics_episode_nerf.append(all_intrinsics_nerf)
-        #self._near_far_episode_nerf.append(all_near_far_nerf)
-
         # restore start pose
         self._cam_motion[0].restore_pose()
         scene.step()
@@ -280,6 +302,74 @@ class NeRFTaskRecorder(object):
                     f.write('{:.6f}'.format(ele) + ' ')
                 f.write('\n')
 
+    def save_static(self, path_dir):
+        """
+        save imgs and poses for nerf
+        """
+        os.makedirs(path_dir, exist_ok=True)
+        print('saving imgs, extrinsic, intrinsic to {}'.format(path_dir))
+
+        # reset progress bar
+        self.pbar.reset()
+
+        assert len(self._snaps_episode_static) > 0, 'No imgs to save'
+
+        import cv2
+
+        for name, _, _ in self._static_cameras:
+            img_dir = os.path.join(path_dir, name +'_images')
+            depth_dir = os.path.join(path_dir, name + '_depths')
+            pose_dir = os.path.join(path_dir,  name + '_poses')
+            mask_dir = os.path.join(path_dir,  name + '_masks')
+            near_far_dir = os.path.join(path_dir, name + '_near_far')
+
+            os.makedirs(img_dir, exist_ok=True)
+            os.makedirs(depth_dir, exist_ok=True)
+            os.makedirs(pose_dir, exist_ok=True)
+            os.makedirs(mask_dir, exist_ok=True)
+            os.makedirs(near_far_dir, exist_ok=True)
+
+
+            for t, view in enumerate(self._snaps_episode_static[name]):
+
+                pose = self._poses_episode_static[name][t]
+                intrinsics = self._intrinsics_episode_static[name][t]
+                mask = self._masks_episode_static[name][t]
+                near_far = self._near_far_episode_static[name][t]
+                depth = self._depths_episode_static[name][t]
+
+
+                img_path = os.path.join(img_dir, str(t).zfill(4) + '.png')
+                view = cv2.cvtColor(view, cv2.COLOR_RGB2BGR)
+                cv2.imwrite(img_path, view)
+
+                # save the mask
+                mask_path = os.path.join(mask_dir, str(t).zfill(4) + '.png')
+                pil_mask = Image.fromarray(mask)
+                pil_mask.save(mask_path)
+
+                depth_path = os.path.join(depth_dir, str(t).zfill(4) + '.png')
+                depth = utils.float_array_to_rgb_image(depth, scale_factor=DEPTH_SCALE)
+                depth.save(depth_path)
+
+                # save the pose and intrinsic
+                pose_path = os.path.join(pose_dir, str(t).zfill(4) + '.txt')
+                transformation_matrix = pose
+                intrinsic_matrix = intrinsics
+                self.save_extrinsic_and_intrinsic(pose_path, transformation_matrix, intrinsic_matrix)
+
+
+                # save near and far
+                near_far_path = os.path.join(near_far_dir, str(t).zfill(4) + '_near_far.txt')
+                with open(near_far_path, 'w') as f:
+                    f.write(str(near_far[0]) + ' ' + str(near_far[1]) + '\n')
+
+        # save description
+        with open(os.path.join(path_dir, 'description.txt'), 'w') as f:
+            # save each line
+            for desc in self._task_description:
+                f.write(desc + '\n')
+
     def save(self, path_dir, path_nerf):
         """
         save imgs and poses for nerf
@@ -293,7 +383,7 @@ class NeRFTaskRecorder(object):
         assert len(self._snaps_episode) > 0, 'No imgs to save'
         
         import cv2
-        
+
         for t, all_views in enumerate(self._snaps_episode):
 
             if len(all_views) == 0 or len(all_views[0]) == 0:
@@ -308,10 +398,7 @@ class NeRFTaskRecorder(object):
             timestep_cloud_dir = os.path.join(timestep_dir, 'cloud')
             timestep_mask_dir = os.path.join(timestep_dir, 'masks')
 
-            timestep_dir_nerf = os.path.join(path_nerf, str(t))
-            #timestep_img_dir_nerf = os.path.join(timestep_dir_nerf, 'images')
-            #timestep_depth_dir_nerf = os.path.join(timestep_dir_nerf, 'depths')
-            #timestep_pose_dir_nerf = os.path.join(timestep_dir_nerf, 'poses')
+            #timestep_dir_nerf = os.path.join(path_nerf, str(t))
 
             os.makedirs(timestep_img_dir, exist_ok=True)
             os.makedirs(timestep_depth_dir, exist_ok=True)
@@ -320,37 +407,12 @@ class NeRFTaskRecorder(object):
             os.makedirs(timestep_cloud_dir, exist_ok=True)
             os.makedirs(timestep_mask_dir, exist_ok=True)
 
-            #os.makedirs(timestep_img_dir_nerf, exist_ok=True)
-            #os.makedirs(timestep_depth_dir_nerf, exist_ok=True)
-            #os.makedirs(timestep_pose_dir_nerf, exist_ok=True)
-
             all_poses = self._poses_episode[t]
             all_poses_masks = self._poses_masks_episode[t]
             all_intrinsics = self._intrinsics_episode[t]
             all_masks = self._masks_episode[t]
             all_near_far = self._near_far_episode[t]
 
-            """
-            all_poses_nerf = self._poses_episode_nerf[t]
-            all_intrinsics_nerf = self._intrinsics_episode_nerf[t]
-            for i, view in enumerate(self._snaps_episode_nerf[t]):
-                # save the image
-                img_path = os.path.join(timestep_img_dir_nerf, str(i) + '.png')
-                view = cv2.cvtColor(view, cv2.COLOR_RGB2BGR)
-                cv2.imwrite(img_path, view)
-
-                # save the depth
-                depth_path = os.path.join(timestep_depth_dir_nerf, str(i) + '.png')
-                depth = self._depths_episode_nerf[t][i]
-                depth = utils.float_array_to_rgb_image(depth, scale_factor=DEPTH_SCALE)
-                depth.save(depth_path)
-
-                # save the pose and intrinsic
-                pose_path = os.path.join(timestep_pose_dir_nerf, str(i) + '.txt')
-                transformation_matrix = all_poses_nerf[i]
-                intrinsic_matrix = all_intrinsics_nerf[i]
-                self.save_extrinsic_and_intrinsic(pose_path, transformation_matrix, intrinsic_matrix)
-            """
             number_of_motion_cameras = len(self._cam_motion)
             for i, view in enumerate(all_views):
                 # save the image
